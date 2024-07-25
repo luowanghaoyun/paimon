@@ -36,6 +36,8 @@ import static org.apache.paimon.CoreOptions.BUCKET;
 import static org.apache.paimon.CoreOptions.FIELDS_PREFIX;
 import static org.apache.paimon.CoreOptions.MERGE_ENGINE;
 import static org.apache.paimon.CoreOptions.SEQUENCE_FIELD;
+import static org.apache.paimon.CoreOptions.SEQUENCE_REVERSE;
+import static org.apache.paimon.mergetree.compact.PartialUpdateMergeFunction.SEQUENCE_GROUP;
 import static org.apache.paimon.schema.SchemaValidation.validateTableSchema;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -196,6 +198,48 @@ public class TableSchemaTest {
         options.put(BUCKET.key(), "-2");
         assertThatThrownBy(() -> validateTableSchema(schema))
                 .hasMessageContaining("The number of buckets needs to be greater than 0.");
+    }
+
+    @Test
+    public void testAggregation() {
+        List<DataField> fields =
+                Arrays.asList(
+                        new DataField(0, "f0", DataTypes.INT()),
+                        new DataField(1, "f1", DataTypes.INT()),
+                        new DataField(2, "f2", DataTypes.INT()));
+        List<String> primaryKeys = Collections.singletonList("f0");
+        Map<String, String> options = new HashMap<>();
+
+        TableSchema schema =
+                new TableSchema(1, fields, 10, Collections.emptyList(), primaryKeys, options, "");
+
+        // sequence fields
+        options.put(MERGE_ENGINE.key(), CoreOptions.MergeEngine.AGGREGATE.toString());
+        options.put(SEQUENCE_FIELD.key(), "f1");
+        options.put(FIELDS_PREFIX + ".f2." + AGG_FUNCTION, "first_non_null_value");
+        assertThatThrownBy(() -> validateTableSchema(schema))
+                .hasMessageContaining(
+                        "Sequence fields conflict with the aggregate function 'first_non_null_value' of field 'f2'");
+
+        // sequence group
+        options.remove(SEQUENCE_FIELD.key());
+        options.put(MERGE_ENGINE.key(), CoreOptions.MergeEngine.PARTIAL_UPDATE.toString());
+        options.put(FIELDS_PREFIX + ".f1." + SEQUENCE_GROUP, "f2");
+        options.put(FIELDS_PREFIX + ".f2." + AGG_FUNCTION, "first_value");
+        assertThatThrownBy(() -> validateTableSchema(schema))
+                .hasMessageContaining(
+                        "Sequence group 'f1' conflict with the aggregate function 'first_value' of field 'f2'");
+
+        // reversal sequence group
+        options.put(MERGE_ENGINE.key(), CoreOptions.MergeEngine.PARTIAL_UPDATE.toString());
+        options.put(FIELDS_PREFIX + ".f1." + SEQUENCE_GROUP, "f2");
+        options.put(FIELDS_PREFIX + ".f1." + SEQUENCE_REVERSE, "true");
+        options.put(FIELDS_PREFIX + ".f2." + AGG_FUNCTION, "last_non_null_value");
+        assertThatThrownBy(() -> validateTableSchema(schema))
+                .hasMessageContaining(
+                        "In the reversal sequence group，the aggregate function of all fields must be "
+                                + "'first_value', the aggregate function "
+                                + "of field 'f2' is 'last_non_null_value'");
     }
 
     static RowType newRowType(boolean isNullable, int fieldId) {

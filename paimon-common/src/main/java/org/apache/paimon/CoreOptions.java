@@ -75,6 +75,8 @@ public class CoreOptions implements Serializable {
 
     public static final String COLUMNS = "columns";
 
+    public static final String SEQUENCE_REVERSE = "sequence-reverse";
+
     public static final ConfigOption<Integer> BUCKET =
             key("bucket")
                     .intType()
@@ -1797,6 +1799,13 @@ public class CoreOptions implements Serializable {
     @Nullable
     public String recordLevelTimeField() {
         return options.get(RECORD_LEVEL_TIME_FIELD);
+    }
+
+    public boolean fieldSequenceReverse(String sequenceFieldName) {
+        return options.get(
+                key(FIELDS_PREFIX + "." + sequenceFieldName + "." + SEQUENCE_REVERSE)
+                        .booleanType()
+                        .defaultValue(false));
     }
 
     /** Specifies the merge engine for table with primary key. */

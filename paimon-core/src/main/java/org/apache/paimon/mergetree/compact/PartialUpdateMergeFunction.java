@@ -158,11 +158,21 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                 Long currentSeq = sequenceGen.generate(kv.value());
                 if (currentSeq != null) {
                     Long previousSeq = sequenceGen.generate(row);
-                    if (previousSeq == null || currentSeq >= previousSeq) {
-                        row.setField(
-                                i, aggregator == null ? field : aggregator.agg(accumulator, field));
-                    } else if (aggregator != null) {
-                        row.setField(i, aggregator.agg(field, accumulator));
+                    if (!sequenceGen.reverse()) {
+                        if (previousSeq == null || currentSeq >= previousSeq) {
+                            row.setField(
+                                    i,
+                                    aggregator == null
+                                            ? field
+                                            : aggregator.agg(accumulator, field));
+                        } else if (aggregator != null) {
+                            row.setField(i, aggregator.agg(field, accumulator));
+                        }
+                    } else {
+                        // 如果 sequence reverse, 只可能是 first_value，保留 sequence 最小的值
+                        if (previousSeq == null || currentSeq <= previousSeq) {
+                            row.setField(i, field);
+                        }
                     }
                 }
             }
@@ -177,31 +187,42 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                 if (currentSeq != null) {
                     Long previousSeq = sequenceGen.generate(row);
                     FieldAggregator aggregator = fieldAggregators.get(i);
-                    if (previousSeq == null || currentSeq >= previousSeq) {
-                        if (sequenceGen.index() == i) {
-                            // update sequence field
-                            row.setField(i, getters[i].getFieldOrNull(kv.value()));
-                        } else {
-                            // retract normal field
-                            if (aggregator == null) {
-                                row.setField(i, null);
+                    if (!sequenceGen.reverse()) {
+                        if (previousSeq == null || currentSeq >= previousSeq) {
+                            if (sequenceGen.index() == i) {
+                                // update sequence field
+                                row.setField(i, getters[i].getFieldOrNull(kv.value()));
                             } else {
-                                // retract agg field
-                                Object accumulator = getters[i].getFieldOrNull(row);
-                                row.setField(
-                                        i,
-                                        aggregator.retract(
-                                                accumulator,
-                                                getters[i].getFieldOrNull(kv.value())));
+                                // retract normal field
+                                if (aggregator == null) {
+                                    row.setField(i, null);
+                                } else {
+                                    // retract agg field
+                                    Object accumulator = getters[i].getFieldOrNull(row);
+                                    row.setField(
+                                            i,
+                                            aggregator.retract(
+                                                    accumulator,
+                                                    getters[i].getFieldOrNull(kv.value())));
+                                }
+                            }
+                        } else if (aggregator != null) {
+                            // retract agg field for old sequence
+                            Object accumulator = getters[i].getFieldOrNull(row);
+                            row.setField(
+                                    i,
+                                    aggregator.retract(
+                                            accumulator, getters[i].getFieldOrNull(kv.value())));
+                        }
+                    } else {
+                        if (previousSeq == null || currentSeq <= previousSeq) {
+                            // 如果 sequence reverse, agg fuc 只可能是 first_value
+                            // 但是 first_value 不支持 retract, 只更新 sequence field
+                            if (sequenceGen.index() == i) {
+                                // update sequence field
+                                row.setField(i, getters[i].getFieldOrNull(kv.value()));
                             }
                         }
-                    } else if (aggregator != null) {
-                        // retract agg field for old sequence
-                        Object accumulator = getters[i].getFieldOrNull(row);
-                        row.setField(
-                                i,
-                                aggregator.retract(
-                                        accumulator, getters[i].getFieldOrNull(kv.value())));
                     }
                 }
             }
@@ -224,7 +245,6 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
     private static class Factory implements MergeFunctionFactory<KeyValue> {
 
         private static final long serialVersionUID = 1L;
-
         private final boolean ignoreDelete;
         private final List<DataType> tableTypes;
         private final Map<Integer, SequenceGenerator> fieldSequences;
@@ -237,6 +257,8 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
 
             List<String> fieldNames = rowType.getFieldNames();
             this.fieldSequences = new HashMap<>();
+
+            CoreOptions coreOptions = new CoreOptions(options);
             for (Map.Entry<String, String> entry : options.toMap().entrySet()) {
                 String k = entry.getKey();
                 String v = entry.getValue();
@@ -245,8 +267,9 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                             k.substring(
                                     FIELDS_PREFIX.length() + 1,
                                     k.length() - SEQUENCE_GROUP.length() - 1);
+                    boolean isReverse = coreOptions.fieldSequenceReverse(sequenceFieldName);
                     SequenceGenerator sequenceGen =
-                            new SequenceGenerator(sequenceFieldName, rowType);
+                            new SequenceGenerator(sequenceFieldName, rowType, isReverse);
                     Arrays.stream(v.split(","))
                             .map(
                                     fieldName -> {
@@ -274,8 +297,7 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                     fieldSequences.put(sequenceGen.index(), sequenceGen);
                 }
             }
-            this.fieldAggregators =
-                    createFieldAggregators(rowType, primaryKeys, new CoreOptions(options));
+            this.fieldAggregators = createFieldAggregators(rowType, primaryKeys, coreOptions);
             if (fieldAggregators.size() > 0 && fieldSequences.isEmpty()) {
                 throw new IllegalArgumentException(
                         "Must use sequence group for aggregation functions.");
@@ -306,7 +328,9 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                                     projectedSequences.put(
                                             newField,
                                             new SequenceGenerator(
-                                                    newSequenceId, sequence.fieldType()));
+                                                    newSequenceId,
+                                                    sequence.fieldType(),
+                                                    sequence.reverse()));
                                 }
                             }
                         });
@@ -400,12 +424,14 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
 
     private static class SequenceGenerator {
 
+        private final boolean reverse;
         private final int index;
 
         private final Generator generator;
         private final DataType fieldType;
 
-        private SequenceGenerator(String field, RowType rowType) {
+        private SequenceGenerator(String field, RowType rowType, boolean isReverse) {
+            reverse = isReverse;
             index = rowType.getFieldNames().indexOf(field);
             if (index == -1) {
                 throw new RuntimeException(
@@ -417,7 +443,8 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
             generator = fieldType.accept(new SequenceGeneratorVisitor());
         }
 
-        public SequenceGenerator(int index, DataType dataType) {
+        public SequenceGenerator(int index, DataType dataType, boolean isReverse) {
+            reverse = isReverse;
             this.index = index;
 
             this.fieldType = dataType;
@@ -425,6 +452,10 @@ public class PartialUpdateMergeFunction implements MergeFunction<KeyValue> {
                 throw new RuntimeException(String.format("Index : %s is invalid", index));
             }
             generator = fieldType.accept(new SequenceGeneratorVisitor());
+        }
+
+        public boolean reverse() {
+            return reverse;
         }
 
         public int index() {

@@ -327,16 +327,22 @@ public class PartialUpdateITCase extends CatalogITCaseBase {
                         + " WITH ("
                         + "'merge-engine'='partial-update', "
                         + "'fields.g_1.sequence-group'='a', "
+                        + "'fields.g_1.sequence-reverse'='true', "
                         + "'fields.a.aggregate-function'='first_value');");
 
-        sql("INSERT INTO AGG VALUES (1, 1, 1), (1, 2, 2)");
+        sql("INSERT INTO AGG VALUES (1, 2, 2), (1, 4, 4)");
 
-        assertThat(sql("SELECT * FROM AGG")).containsExactlyInAnyOrder(Row.of(1, 1, 2));
+        assertThat(sql("SELECT * FROM AGG")).containsExactlyInAnyOrder(Row.of(1, 2, 2));
 
         // old sequence
-        sql("INSERT INTO AGG VALUES (1, 0, 0)");
+        sql("INSERT INTO AGG VALUES (1, 3, 3)");
 
-        assertThat(sql("SELECT * FROM AGG")).containsExactlyInAnyOrder(Row.of(1, 0, 2));
+        assertThat(sql("SELECT * FROM AGG")).containsExactlyInAnyOrder(Row.of(1, 2, 2));
+
+        // old sequence
+        sql("INSERT INTO AGG VALUES (1, 1, 1)");
+
+        assertThat(sql("SELECT * FROM AGG")).containsExactlyInAnyOrder(Row.of(1, 1, 1));
     }
 
     @Test

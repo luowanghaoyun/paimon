@@ -25,6 +25,9 @@ import org.apache.paimon.casting.CastExecutor;
 import org.apache.paimon.casting.CastExecutors;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.format.FileFormat;
+import org.apache.paimon.mergetree.compact.aggregate.FieldFirstNonNullValueAgg;
+import org.apache.paimon.mergetree.compact.aggregate.FieldFirstValueAgg;
+import org.apache.paimon.mergetree.compact.aggregate.FieldLastNonNullValueAgg;
 import org.apache.paimon.options.ConfigOption;
 import org.apache.paimon.options.Options;
 import org.apache.paimon.types.ArrayType;
@@ -45,6 +48,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.CoreOptions.AGG_FUNCTION;
 import static org.apache.paimon.CoreOptions.BUCKET_KEY;
 import static org.apache.paimon.CoreOptions.CHANGELOG_NUM_RETAINED_MAX;
 import static org.apache.paimon.CoreOptions.CHANGELOG_NUM_RETAINED_MIN;
@@ -379,6 +383,7 @@ public class SchemaValidation {
                                     sequenceFieldName));
                 }
 
+                boolean reverse = options.fieldSequenceReverse(sequenceFieldName);
                 for (String field : v.split(",")) {
                     if (!fieldNames.contains(field)) {
                         throw new IllegalArgumentException(
@@ -390,6 +395,28 @@ public class SchemaValidation {
                                 String.format(
                                         "Field %s is defined repeatedly by multiple groups: %s.",
                                         field, group));
+                    }
+                    String aggFunc = options.fieldAggFunc(field);
+                    if (!reverse) {
+                        // first_value/first_non_null_value/last_non_null_value 存在语义问题，禁用
+                        checkArgument(
+                                !(FieldFirstValueAgg.NAME.equals(aggFunc)
+                                        || FieldFirstNonNullValueAgg.NAME.equals(aggFunc)
+                                        || FieldFirstNonNullValueAgg.LEGACY_NAME.equals(aggFunc)
+                                        || FieldLastNonNullValueAgg.NAME.equals(aggFunc)),
+                                "Sequence group '%s' conflict with the aggregate function '%s' of field '%s'",
+                                sequenceFieldName,
+                                aggFunc,
+                                field);
+                    } else {
+                        // sequence reverse，agg fuc 必须是 first_value
+                        checkArgument(
+                                FieldFirstValueAgg.NAME.equals(aggFunc),
+                                "In the reversal sequence group，the aggregate function of all fields must be "
+                                        + "'first_value', the aggregate function "
+                                        + "of field '%s' is '%s'",
+                                field,
+                                aggFunc);
                     }
                 }
             }
@@ -514,6 +541,25 @@ public class SchemaValidation {
                                 "You can not use sequence.field in cross partition update case "
                                         + "(Primary key constraint '%s' not include all partition fields '%s').",
                                 schema.primaryKeys(), schema.partitionKeys()));
+            }
+
+            // sequence field 禁用 agg fuc first_value/first_non_null_value
+            for (Map.Entry<String, String> entry : options.toMap().entrySet()) {
+                String k = entry.getKey();
+                String v = entry.getValue();
+                if (k.startsWith(FIELDS_PREFIX) && k.endsWith(AGG_FUNCTION)) {
+                    String field =
+                            k.substring(
+                                    FIELDS_PREFIX.length() + 1,
+                                    k.length() - AGG_FUNCTION.length() - 1);
+                    checkArgument(
+                            !(FieldFirstValueAgg.NAME.equals(v)
+                                    || FieldFirstNonNullValueAgg.NAME.equals(v)
+                                    || FieldFirstNonNullValueAgg.LEGACY_NAME.equals(v)),
+                            "Sequence fields conflict with the aggregate function '%s' of field '%s'",
+                            v,
+                            field);
+                }
             }
         }
     }
